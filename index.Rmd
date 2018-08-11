@@ -1,30 +1,437 @@
 ---
 title: "Practical Machine Learning Course Project"
 author: "Koji Takahashi"
-date: "2018年8月10日"
+date: "2018/8/11"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+## Load library
+library(caret)
+library(randomForest)
+library(e1071)
+library(gbm)
+library(xgboost)
+library(Matrix)
+library(dplyr)
+library(rattle)
+library(ParallelForest)
+library(nnet)
+library(klaR)
+library(doParallel)
+library(tidyverse)
+cl <- makeCluster(2) 
+registerDoParallel(cl)
 ```
 
-## R Markdown
+# Prediction Assignment Writeup
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+## 1. Overview
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+The goal of this project is to predict how the six participants exercised (the "Classe" variable of the training set) using various machine learning methods. Participants were asked to perform the barbell lift correctly and incorrectly in five different ways. We predict using accelerometer data of belts, forearms, arms, dumbbells. More information is available from the website here: http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har
 
-```{r cars}
-summary(cars)
+## 2. Contents of Weight Lifting Exercises
+
+Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes.
+
+## 3. Data Loading and Cleaning
+
+### 3.1. Data Loading
+
+The training data for this project are available here:  
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv  
+The test data are available here:  
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv 
+
+```{r data}
+## Download and loading
+# Download and loading the dataset
+trainingUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+quizUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+trainingData <- read.csv(url(trainingUrl), na.strings = c("NA", "#DIV/0!", ""))
+quizData <- read.csv(url(quizUrl), na.strings = c("NA", "#DIV/0!", ""))
 ```
 
-## Including Plots
+### 3.2. Data Cleaning
 
-You can also embed plots, for example:
+We will remove the columns that are the near zero variance predictors, the columns containing NA and the first 6 columns that are not predictor.
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r cleaning}
+# Data Cleaning
+nzv <- nearZeroVar(trainingData, saveMetrics = F)
+trainingData <- trainingData[, -nzv]
+trainingData <- trainingData[, colSums(is.na(trainingData)) == 0]
+trainingData <- trainingData[, -(1:6)] # not predictor
+
+quizData <- quizData[, -nzv]
+quizData <- quizData[, colSums(is.na(quizData)) == 0]
+quizData <- quizData[, -(1:6)] # not predictor
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+### 3.3. trainSet and testSet
+
+We divide the trainingData into trainSet and testSet.
+
+```{r train_test}
+# trainSet and testSet
+inTrain <- createDataPartition(trainingData$classe, p = 0.7, list = FALSE)
+trainSet <- trainingData[inTrain, ]
+testSet <- trainingData[-inTrain, ]
+```
+
+## 4. Exploratory Analysis 
+
+The data set has biased data distributions like the roll_belt column. We will preprocess the data set using center, scale and BoxCox if necessary, and then we will make the model.
+
+```{r exploratory, echo=FALSE, fig.width=8}
+hist(trainSet$roll_belt, main="Distribution of roll_belt", 
+     col="#993435")
+```
+
+## 5. Prediction Model Building
+
+We will create models using the following 7 methods with an accuracy of approximately 0.7 or higher:  
+
+ * Random Forest (rf)  
+ * Gradient Boosting Machine (gbm)  
+ * eXtreme Gradient Boosting (xgbTree)  
+ * Neural Network (nnet)  
+ * Support Vector Machine (svmRadial)  
+ * k Nearest Neighbor (knn)  
+ * Linear Discriminant Analysis (lda)  
+ 
+We will specify trainControl as cross validation ("cv" or "repeatedcv"). Also, to save time, we will set "number = 3" (3-fold cross validation).  
+Since Decision Tree (rpart) was low in accuracy, it was excluded.
+
+```{r model}
+## Model building "rpart","rf","gbm","xgb","nnet","svmRadial","knn","lda"
+# trainControl (excluding knn(repeatedcv))
+cvControl = trainControl(method = "cv", number = 3, allowParallel = TRUE)
+```
+
+### 5.1. Random Forest
+
+We will optimize mtry using the tuneRF function, and then create an rf model.  
+According to plot of rfMod, the variables contributing to classification are roll_belt, pitch_forearm, yaw_belt, magnet_dumbbell_z, magnet_dumbbell_y and so on.  
+
+```{r rf, cache=TRUE, fig.width=8}
+# rf
+set.seed(7)
+tune_mtry <- tuneRF(trainSet[,-53], trainSet[,53],doBest=T)
+rfMod <-randomForest(classe ~ ., trainSet, mtry=tune_mtry$mtry, 
+                     importance=T, trControl = cvControl)
+rfPred <- predict(rfMod, testSet)
+confusionMatrix(rfPred, testSet$classe)$overall
+varImpPlot(rfMod)
+```
+
+### 5.2. Gradient Boosting Machine
+
+Refer to the appendix for the following analysis code.  
+
+```{r gbm1, include=FALSE, cache=TRUE}
+# gbm
+set.seed(7)
+gbmMod <- train(classe ~ ., method = "gbm", data = trainSet, 
+                trControl = cvControl)
+```
+
+```{r gbm2, echo=FALSE}
+gbmPred <- predict(gbmMod, testSet)
+confusionMatrix(gbmPred, testSet$classe)$overall
+```
+
+### 5.3. eXtreme Gradient Boosting
+
+```{r xgb, echo=FALSE, cache=TRUE}
+# xgb
+set.seed(7)
+xgbMod <- train(classe ~ ., method = "xgbTree", data = trainSet, 
+                metric = "Accuracy", trControl = cvControl)
+xgbPred <- predict(xgbMod, testSet)
+confusionMatrix(data = xgbPred, reference = testSet$classe,
+                dnn = c("Prediction", "Actual"), 
+                mode = "prec_recall")$overall
+```
+
+### 5.4. Neural Network
+
+The accuracy of the neural network has greatly improved by using "BoxCox", "center" and "scale".  
+
+```{r nnet, echo=FALSE, cache=TRUE}
+# nnet
+set.seed(7)
+nnetMod <- train(classe ~ ., method = "nnet", data = trainSet, trace=F,
+                 trControl = cvControl, 
+                 preProcess = c("BoxCox","center","scale"))
+nnetPred <- predict(nnetMod, testSet)
+confusionMatrix(nnetPred, testSet$classe)$overall
+```
+
+### 5.5. Support Vector Machine
+
+```{r svm, echo=FALSE, cache=TRUE}
+#svm
+set.seed(7)
+svmMod <- train(classe ~ ., method = "svmRadial", data = trainSet, 
+                trControl = cvControl, trace=T, tuneLength=10)
+svmPred <- predict(svmMod, testSet)
+confusionMatrix(svmPred, testSet$classe)$overall
+```
+
+### 5.6. k Nearest Neighbor
+
+```{r knn, echo=FALSE, cache=TRUE}
+# knn
+set.seed(7)
+knnctrl <- trainControl(method="repeatedcv", number = 3, repeats = 5)
+knnMod <- train(classe ~ ., method = "knn", data = trainSet, 
+                trControl = knnctrl, 
+                preProcess = c("center","scale"))
+knnPred <- predict(knnMod, newdata = testSet)
+confusionMatrix(knnPred, testSet$classe)$overall
+```
+
+### 5.7. Linear Discriminant Analysis
+
+```{r lda, echo=FALSE, cache=TRUE}
+# lda
+set.seed(7)
+ldaMod <- train(classe ~ ., method = "lda", data = trainSet, 
+                trControl = cvControl, 
+                preProcess = c("BoxCox","center","scale"))
+ldaPred <- predict(ldaMod, testSet)
+confusionMatrix(ldaPred, testSet$classe)$overall
+```
+
+## 6. Expected out of sample error
+
+The top three models (rf, xgbTree, svmRadial) exceed accuracy 0.99. It is surprisingly high accuracy. It is the result predicted with testSet using the model made with trainSet, so there is no overfitting.  
+I calculated the average of confusionMatrix of these 3 models. The distribution of error data is not uniform, and the number of errors in the following example is relatively large.  
+
+* Between Class A (the Unilateral Dumbbell Biceps Curl) and Class B (throwing the elbows to the front).  
+* Between Class B (throwing the elbows to the front) and Class C (lifting the dumbbell only halfway)
+* Between Class C (lifting the dumbbell only halfway) and Class D (lowering the dumbbell only halfway).  
+
+```{r error_data, echo=FALSE}
+meanTable <- (confusionMatrix(rfPred, testSet$classe)$table +
+                      confusionMatrix(xgbPred, testSet$classe)$table +
+                      confusionMatrix(svmPred, testSet$classe)$table) / 3
+meanTable <- round(meanTable, digits = 1); meanTable
+```
+
+## 7. Applying the prediction Models to the Test Cases
+
+The prediction of 20 test cases is decided by the majority vote of prediction of the 7 models.
+The matchRate column is the match rate of the majority vote result and prediction of each model. 
+The matchRate and the accuracy are roughly in agreement.  
+
+```{r 20case, echo=FALSE}
+RF <- predict(rfMod, quizData)
+GBM <- predict(gbmMod, quizData)
+XGB <- predict(xgbMod, quizData)
+NNET <- predict(nnetMod, quizData)
+SVM <- predict(svmMod, quizData)
+KNN <- predict(knnMod, quizData)
+LDA <- predict(ldaMod, quizData)
+
+df <- data.frame(RF, GBM, XGB, NNET, SVM, KNN, LDA)
+df <- as.data.frame(t(df))
+
+majority <- c()
+for (i in 1:20) {
+        majority <- c(majority, names(which.max(table(df[, i]))))
+}
+majority <- as.data.frame(t(data.frame(majority)))
+colnames(majority) <- names(df)
+df <- rbind(df, majority)
+nmajority <- c(2,1,2,1,1,5,4,2,1,1,2,3,2,1,5,5,1,2,2,2)
+ML <- list(RF,GBM,XGB,NNET,SVM,KNN,LDA)
+matchRate <- c()
+for (i in ML) {
+        match_i <- sum(as.numeric(i) == nmajority)
+        matchRate <- c(matchRate, match_i)
+}
+matchRate <- c(matchRate, 20)
+matchRate <- matchRate / 20
+
+accuracy <- c()
+MLpred <- list(rfPred, gbmPred, xgbPred, nnetPred, svmPred,
+               knnPred, ldaPred)
+for (i in MLpred) {
+        conf_i <- confusionMatrix(i, testSet$classe)$overall[1]
+        accuracy <- c(accuracy, conf_i)
+}
+accuracy <- round(accuracy, digits = 3)
+accuracy <- c(accuracy, "-")
+df <- cbind(df, matchRate, accuracy)
+print(df)
+
+stopCluster(cl)
+registerDoSEQ()
+```
+
+# Appendix
+
+The whole code is shown below.
+
+```{r code, eval=FALSE}
+## Load library
+library(caret)
+library(randomForest)
+library(e1071)
+library(gbm)
+library(xgboost)
+library(Matrix)
+library(dplyr)
+library(rattle)
+library(ParallelForest)
+library(nnet)
+library(klaR)
+library(doParallel)
+library(tidyverse)
+
+cl <- makeCluster(2) 
+registerDoParallel(cl)
+
+## 3. Download and loading
+# 3.1. Data Loading
+trainingUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+quizUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+trainingData <- read.csv(url(trainingUrl), na.strings = c("NA", "#DIV/0!", ""))
+quizData <- read.csv(url(quizUrl), na.strings = c("NA", "#DIV/0!", ""))
+
+# 3.2. Data Cleaning
+nzv <- nearZeroVar(trainingData, saveMetrics = F)
+trainingData <- trainingData[, -nzv]
+trainingData <- trainingData[, colSums(is.na(trainingData)) == 0]
+trainingData <- trainingData[, -(1:6)] # not predictor
+
+quizData <- quizData[, -nzv]
+quizData <- quizData[, colSums(is.na(quizData)) == 0]
+quizData <- quizData[, -(1:6)] # not predictor
+
+# 3.3. trainSet and testSet
+inTrain <- createDataPartition(trainingData$classe, p = 0.7, list = FALSE)
+trainSet <- trainingData[inTrain, ]
+testSet <- trainingData[-inTrain, ]
+
+## 4. Exploratory Analysis
+hist(trainSet$roll_belt, main="Distribution of roll_belt", 
+     col="#993435")
+
+## 5. Prediction Model Building "rf","gbm","xgb","nnet","svmRadial","knn","lda"
+# trainControl (excluding knn(repeatedcv))
+cvControl = trainControl(method = "cv", number = 3, allowParallel = TRUE)
+
+# 5.1. rf
+set.seed(7)
+tune_mtry <- tuneRF(trainSet[,-53], trainSet[,53],doBest=T)
+rfMod <-randomForest(classe ~ ., trainSet, mtry=tune_mtry$mtry, 
+                     importance=T, trControl = cvControl)
+rfPred <- predict(rfMod, testSet)
+confusionMatrix(rfPred, testSet$classe)$overall
+varImpPlot(rfMod)
+
+# 5.2. gbm
+set.seed(7)
+gbmMod <- train(classe ~ ., method = "gbm", data = trainSet, 
+                trControl = cvControl)
+gbmPred <- predict(gbmMod, testSet)
+confusionMatrix(gbmPred, testSet$classe)$overall
+
+# 5.3. xgb
+set.seed(7)
+xgbMod <- train(classe ~ ., method = "xgbTree", data = trainSet, 
+                metric = "Accuracy", trControl = cvControl)
+xgbPred <- predict(xgbMod, testSet)
+confusionMatrix(data = xgbPred, reference = testSet$classe,
+                dnn = c("Prediction", "Actual"), 
+                mode = "prec_recall")$overall
+
+# 5.4. nnet
+set.seed(7)
+nnetMod <- train(classe ~ ., method = "nnet", data = trainSet, trace=F,
+                 trControl = cvControl, 
+                 preProcess = c("BoxCox","center","scale"))
+nnetPred <- predict(nnetMod, testSet)
+confusionMatrix(nnetPred, testSet$classe)$overall
+
+# 5.5. svm
+set.seed(7)
+svmMod <- train(classe ~ ., method = "svmRadial", data = trainSet, 
+                trControl = cvControl, trace=T, tuneLength=10)
+svmPred <- predict(svmMod, testSet)
+confusionMatrix(svmPred, testSet$classe)$overall
+
+# 5.6. knn
+set.seed(7)
+knnctrl <- trainControl(method="repeatedcv", number = 3, repeats = 5)
+knnMod <- train(classe ~ ., method = "knn", data = trainSet, 
+                trControl = knnctrl, 
+                preProcess = c("center","scale"))
+knnPred <- predict(knnMod, newdata = testSet)
+confusionMatrix(knnPred, testSet$classe)$overall
+
+# 5.7. lda
+set.seed(7)
+ldaMod <- train(classe ~ ., method = "lda", data = trainSet, 
+                trControl = cvControl, 
+                preProcess = c("BoxCox","center","scale"))
+ldaPred <- predict(ldaMod, testSet)
+confusionMatrix(ldaPred, testSet$classe)$overall
+
+## 6. Expected out of sample error
+meanTable <- (confusionMatrix(rfPred, testSet$classe)$table +
+                      confusionMatrix(xgbPred, testSet$classe)$table +
+                      confusionMatrix(svmPred, testSet$classe)$table) / 3
+meanTable <- round(meanTable, digits = 1); meanTable
+
+## 7. Applying the prediction Models to the Test Cases
+RF <- predict(rfMod, quizData)
+GBM <- predict(gbmMod, quizData)
+XGB <- predict(xgbMod, quizData)
+NNET <- predict(nnetMod, quizData)
+SVM <- predict(svmMod, quizData)
+KNN <- predict(knnMod, quizData)
+LDA <- predict(ldaMod, quizData)
+
+df <- data.frame(RF, GBM, XGB, NNET, SVM, KNN, LDA)
+df <- as.data.frame(t(df))
+
+majority <- c()
+for (i in 1:20) {
+        majority <- c(majority, names(which.max(table(df[, i]))))
+}
+majority <- as.data.frame(t(data.frame(majority)))
+colnames(majority) <- names(df)
+df <- rbind(df, majority)
+nmajority <- c(2,1,2,1,1,5,4,2,1,1,2,3,2,1,5,5,1,2,2,2)
+ML <- list(RF,GBM,XGB,NNET,SVM,KNN,LDA)
+matchRate <- c()
+for (i in ML) {
+        match_i <- sum(as.numeric(i) == nmajority)
+        matchRate <- c(matchRate, match_i)
+}
+matchRate <- c(matchRate, 20)
+matchRate <- matchRate / 20
+
+accuracy <- c()
+MLpred <- list(rfPred, gbmPred, xgbPred, nnetPred, svmPred,
+               knnPred, ldaPred)
+for (i in MLpred) {
+        conf_i <- confusionMatrix(i, testSet$classe)$overall[1]
+        accuracy <- c(accuracy, conf_i)
+}
+accuracy <- round(accuracy, digits = 3)
+accuracy <- c(accuracy, "-")
+df <- cbind(df, matchRate, accuracy)
+print(df)
+
+stopCluster(cl)
+registerDoSEQ()
+```
